@@ -6,6 +6,8 @@ import '../../../core/di/providers.dart';
 import '../application/editor_notifier.dart';
 import '../application/editor_state.dart';
 import '../domain/entities/editor_document.dart';
+import '../domain/entities/highlight_token.dart';
+import '../domain/entities/highlight_theme.dart';
 import '../infrastructure/syntax_highlighter.dart';
 
 // Providers
@@ -111,8 +113,9 @@ class CodeEditorWidget extends ConsumerStatefulWidget {
 class _CodeEditorWidgetState extends ConsumerState<CodeEditorWidget> {
   final ScrollController _lineNumberScrollController = ScrollController();
   final ScrollController _codeScrollController = ScrollController();
-  TextEditingController? _textController;
+  CodeController? _textController;
   String? _currentPath;
+  bool _lspInitialized = false;
 
   @override
   void initState() {
@@ -128,11 +131,61 @@ class _CodeEditorWidgetState extends ConsumerState<CodeEditorWidget> {
 
   @override
   void dispose() {
+    _closeCurrentDocument();
     _codeScrollController.removeListener(_syncLineNumbers);
     _lineNumberScrollController.dispose();
     _codeScrollController.dispose();
     _textController?.dispose();
     super.dispose();
+  }
+
+  Future<void> _openDocumentInLsp(EditorDocument document) async {
+    final provider = ref.read(highlightProviderProvider);
+    debugPrint('[Editor] Opening document in LSP: ${document.path}');
+    try {
+      await provider.documentOpened(document.path, document.content, document.language);
+      _lspInitialized = true;
+      debugPrint('[Editor] LSP document opened, requesting tokens...');
+      _requestSemanticTokens(document.path);
+    } catch (e) {
+      debugPrint('[Editor] LSP open failed: $e');
+    }
+  }
+
+  void _closeCurrentDocument() {
+    if (_currentPath != null && _lspInitialized) {
+      final provider = ref.read(highlightProviderProvider);
+      provider.documentClosed(_currentPath!);
+    }
+  }
+
+  Future<void> _notifyContentChanged(String path, String content) async {
+    if (!_lspInitialized) return;
+    final provider = ref.read(highlightProviderProvider);
+    await provider.documentChanged(path, content);
+    
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted && _currentPath == path) {
+        _requestSemanticTokens(path);
+      }
+    });
+  }
+
+  Future<void> _requestSemanticTokens(String path) async {
+    final provider = ref.read(highlightProviderProvider);
+    debugPrint('[Editor] Requesting semantic tokens for: $path');
+    final tokens = await provider.highlight(
+      _textController?.text ?? '',
+      ref.read(editorProvider).activeDocument?.language ?? '',
+      path,
+    );
+    
+    debugPrint('[Editor] Got ${tokens?.length ?? 0} semantic tokens');
+    if (mounted && _textController != null && _currentPath == path) {
+      setState(() {
+        _textController!.semanticTokens = tokens;
+      });
+    }
   }
 
   void _saveCurrentFile() {
@@ -170,7 +223,9 @@ class _CodeEditorWidgetState extends ConsumerState<CodeEditorWidget> {
 
     // Update text controller when document changes
     if (_currentPath != document.path) {
+      _closeCurrentDocument();
       _currentPath = document.path;
+      _lspInitialized = false;
       _textController?.dispose();
       final highlighter = ref.read(syntaxHighlighterProvider);
       _textController = CodeController(
@@ -178,6 +233,7 @@ class _CodeEditorWidgetState extends ConsumerState<CodeEditorWidget> {
         language: document.language,
         syntaxHighlighter: highlighter,
       );
+      _openDocumentInLsp(document);
     }
 
     return KeyboardListener(
@@ -336,6 +392,7 @@ class _NoScrollbarBehavior extends ScrollBehavior {
 class CodeController extends TextEditingController {
   final String language;
   final SyntaxHighlighterService syntaxHighlighter;
+  List<HighlightToken>? semanticTokens;
 
   CodeController({
     super.text,
@@ -349,6 +406,12 @@ class CodeController extends TextEditingController {
     TextStyle? style,
     required bool withComposing,
   }) {
+    // Use semantic tokens if available
+    if (semanticTokens != null && semanticTokens!.isNotEmpty) {
+      return _buildSemanticSpan(style);
+    }
+    
+    // Fall back to regex highlighting
     final highlighted = syntaxHighlighter.highlight(text, language);
     if (highlighted != null) {
       return TextSpan(
@@ -361,5 +424,37 @@ class CodeController extends TextEditingController {
       style: style,
       withComposing: withComposing,
     );
+  }
+
+  TextSpan _buildSemanticSpan(TextStyle? baseStyle) {
+    if (text.isEmpty) {
+      return TextSpan(text: '', style: baseStyle);
+    }
+
+    final spans = <TextSpan>[];
+    final sortedTokens = List<HighlightToken>.from(semanticTokens!)
+      ..sort((a, b) => a.start.compareTo(b.start));
+
+    var currentPos = 0;
+    for (final token in sortedTokens) {
+      if (token.start > currentPos && token.start <= text.length) {
+        spans.add(TextSpan(text: text.substring(currentPos, token.start), style: baseStyle));
+      }
+
+      final tokenEnd = token.end.clamp(0, text.length);
+      final tokenStart = token.start.clamp(0, text.length);
+      if (tokenStart < tokenEnd) {
+        final tokenText = text.substring(tokenStart, tokenEnd);
+        final tokenStyle = HighlightTheme.atomOneDark.getStyle(token.type, token.modifiers);
+        spans.add(TextSpan(text: tokenText, style: baseStyle?.merge(tokenStyle) ?? tokenStyle));
+        currentPos = tokenEnd;
+      }
+    }
+
+    if (currentPos < text.length) {
+      spans.add(TextSpan(text: text.substring(currentPos), style: baseStyle));
+    }
+
+    return TextSpan(children: spans);
   }
 }

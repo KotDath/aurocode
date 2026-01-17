@@ -30,6 +30,8 @@ dependencies:
 
   # Window Manager
   window_manager: ^0.5.1
+  flutter_tree_sitter: ^0.0.8
+  flutter_tree_sitter_editor: ^0.0.6
 
 dev_dependencies:
   flutter_test:
