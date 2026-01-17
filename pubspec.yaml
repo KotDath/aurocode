@@ -1,0 +1,53 @@
+name: aurocode_ide
+description: Flutter IDE built with Clean Architecture
+version: 0.1.0
+publish_to: 'none'
+
+environment:
+  sdk: ^3.5.0
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State Management
+  flutter_riverpod: ^2.6.1
+  riverpod_annotation: ^2.6.1
+
+  # Syntax Highlighting
+  re_highlight: ^0.0.3
+
+  # File System
+  path: ^1.9.0
+
+  # Terminal Emulator
+  xterm: ^4.0.0
+  flutter_pty: ^0.4.2
+
+  # Icons
+  cupertino_icons: ^1.0.8
+
+  # Window Manager
+  window_manager: ^0.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  build_runner: ^2.4.0
+  riverpod_generator: ^2.6.1
+  riverpod_lint: ^2.6.1
+
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: JetBrainsMono
+      fonts:
+        - asset: fonts/fonts/ttf/JetBrainsMono-Regular.ttf
+        - asset: fonts/fonts/ttf/JetBrainsMono-Bold.ttf
+          weight: 700
+        - asset: fonts/fonts/ttf/JetBrainsMono-Italic.ttf
+          style: italic
+        - asset: fonts/fonts/ttf/JetBrainsMono-Medium.ttf
+          weight: 500
