@@ -3,11 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../file_tree/domain/repositories/file_system_repository.dart';
 import '../application/editor_state.dart';
 import '../domain/entities/editor_document.dart';
+import 'language_service.dart';
 
 class EditorNotifier extends StateNotifier<EditorState> {
   final FileSystemRepository _fileRepository;
+  final LanguageService _languageService;
 
-  EditorNotifier(this._fileRepository) : super(const EditorState());
+  EditorNotifier(this._fileRepository, this._languageService) : super(const EditorState());
 
   Future<void> openFile(String path) async {
     // Check if already open
@@ -21,7 +23,7 @@ class EditorNotifier extends StateNotifier<EditorState> {
 
     try {
       final content = await _fileRepository.readFile(path);
-      final language = EditorDocument.detectLanguage(path);
+      final language = _languageService.detectLanguage(path);
 
       final document = EditorDocument(
         path: path,
@@ -102,6 +104,36 @@ class EditorNotifier extends StateNotifier<EditorState> {
         openDocuments: updated,
         activeDocument: state.activeDocument?.path == document.path
             ? updated.firstWhere((d) => d.path == document.path)
+            : state.activeDocument,
+      );
+    } catch (e) {
+      state = state.copyWith(error: 'Failed to save: $e');
+    }
+  }
+
+  Future<void> saveAsDocument(EditorDocument document, String newPath) async {
+    try {
+      await _fileRepository.writeFile(newPath, document.content);
+      
+      final newDoc = EditorDocument(
+        path: newPath,
+        content: document.content,
+        language: EditorDocument.detectLanguage(newPath),
+        isDirty: false,
+      );
+
+      // Replace old document with new one
+      final updated = state.openDocuments.map((doc) {
+        if (doc.path == document.path) {
+          return newDoc;
+        }
+        return doc;
+      }).toList();
+
+      state = EditorState(
+        openDocuments: updated,
+        activeDocument: state.activeDocument?.path == document.path
+            ? newDoc
             : state.activeDocument,
       );
     } catch (e) {

@@ -72,4 +72,28 @@ class NativeFileSystemRepository implements FileSystemRepository {
     final file = File(path);
     await file.writeAsString(content);
   }
+
+  @override
+  Future<int> getFileSize(String path) async {
+    final file = File(path);
+    if (!await file.exists()) return 0;
+    return await file.length();
+  }
+
+  @override
+  Future<String> readPartialFile(String path, {required int length}) async {
+    final file = File(path);
+    if (!await file.exists()) return '';
+    
+    // Read bytes up to length
+    final stream = file.openRead(0, length);
+    final bytes = await stream.expand((chunk) => chunk).toList();
+    
+    try {
+      return String.fromCharCodes(bytes);
+    } catch (e) {
+      // Fallback for encoding issues
+      return 'Error decoding file preview: $e';
+    }
+  }
 }

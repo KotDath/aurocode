@@ -15,6 +15,11 @@ class LspService {
 
   final Map<String, LspClient> _clients = {};
   final Map<String, int> _documentVersions = {};
+  final Map<String, StreamSubscription<FileDiagnostics>> _diagnosticsSubs = {};
+  
+  final _diagnosticsController = StreamController<FileDiagnostics>.broadcast();
+  /// Stream of diagnostics updates from all clients.
+  Stream<FileDiagnostics> get diagnostics => _diagnosticsController.stream;
 
   LspService({this.workspaceRoot});
 
@@ -37,6 +42,11 @@ class LspService {
 
       try {
         await client.start();
+        // Subscribe to diagnostics from this client
+        _diagnosticsSubs[config.id]?.cancel();
+        _diagnosticsSubs[config.id] = client.diagnostics.listen((diag) {
+          _diagnosticsController.add(diag);
+        });
       } catch (e) {
         _clients.remove(config.id);
         rethrow;
@@ -57,14 +67,25 @@ class LspService {
     client.didOpen(uri: uri, languageId: languageId, version: version, text: content);
   }
 
-  Future<void> documentChanged({required String filePath, required String content}) async {
+  Future<void> documentChanged({
+    required String filePath, 
+    required String content,
+    Map<String, dynamic>? range,
+    int? rangeLength,
+  }) async {
     final client = await getClientForFile(filePath);
     if (client == null || client.state != LspClientState.ready) return;
 
     final uri = Uri.file(filePath).toString();
     final version = _bumpVersion(uri);
 
-    client.didChange(uri: uri, version: version, text: content);
+    client.didChange(
+      uri: uri, 
+      version: version, 
+      text: content,
+      range: range,
+      rangeLength: rangeLength,
+    );
   }
 
   Future<void> documentClosed({required String filePath}) async {
@@ -107,6 +128,11 @@ class LspService {
   }
 
   Future<void> dispose() async {
+    for (final sub in _diagnosticsSubs.values) {
+      await sub.cancel();
+    }
+    _diagnosticsSubs.clear();
+    await _diagnosticsController.close();
     final futures = _clients.values.map((c) => c.shutdown());
     await Future.wait(futures);
     _clients.clear();

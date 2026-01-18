@@ -7,10 +7,11 @@ library;
 /// A single highlighted token in the code.
 class HighlightToken {
   /// Start offset in the source code (inclusive).
-  final int start;
+  /// Start offset in the source code (inclusive).
+  int start;
 
   /// End offset in the source code (exclusive).
-  final int end;
+  int end;
 
   /// Token type: 'keyword', 'function', 'string', 'comment', etc.
   final String type;
@@ -18,7 +19,7 @@ class HighlightToken {
   /// Optional modifiers: 'readonly', 'deprecated', 'declaration', etc.
   final List<String> modifiers;
 
-  const HighlightToken({
+  HighlightToken({
     required this.start,
     required this.end,
     required this.type,

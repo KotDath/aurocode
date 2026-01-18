@@ -3,12 +3,14 @@ class EditorDocument {
   final String content;
   final String language;
   final bool isDirty;
+  final bool isReadOnly;
 
   const EditorDocument({
     required this.path,
     required this.content,
     required this.language,
     this.isDirty = false,
+    this.isReadOnly = false,
   });
 
   String get filename => path.split('/').last;
@@ -18,12 +20,14 @@ class EditorDocument {
     String? content,
     String? language,
     bool? isDirty,
+    bool? isReadOnly,
   }) {
     return EditorDocument(
       path: path ?? this.path,
       content: content ?? this.content,
       language: language ?? this.language,
       isDirty: isDirty ?? this.isDirty,
+      isReadOnly: isReadOnly ?? this.isReadOnly,
     );
   }
 

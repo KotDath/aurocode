@@ -5,4 +5,6 @@ abstract class FileSystemRepository {
   Future<bool> exists(String path);
   Future<String> readFile(String path);
   Future<void> writeFile(String path, String content);
+  Future<int> getFileSize(String path);
+  Future<String> readPartialFile(String path, {required int length});
 }

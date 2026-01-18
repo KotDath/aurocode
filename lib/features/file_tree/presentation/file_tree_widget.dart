@@ -18,8 +18,9 @@ typedef OnFileSelected = void Function(String path);
 
 class FileTreeWidget extends ConsumerStatefulWidget {
   final OnFileSelected? onFileSelected;
+  final String? rootPath;
 
-  const FileTreeWidget({super.key, this.onFileSelected});
+  const FileTreeWidget({super.key, this.onFileSelected, this.rootPath});
 
   @override
   ConsumerState<FileTreeWidget> createState() => _FileTreeWidgetState();
@@ -29,12 +30,25 @@ class _FileTreeWidgetState extends ConsumerState<FileTreeWidget> {
   @override
   void initState() {
     super.initState();
-    // Load the current project directory on init
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref
-          .read(fileTreeProvider.notifier)
-          .loadProject('/home/kotdath/omp/personal/rust/aurocode');
+      _loadProject();
     });
+  }
+
+  @override
+  void didUpdateWidget(FileTreeWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.rootPath != widget.rootPath && widget.rootPath != null) {
+      // Delay state modification to after the build phase
+      Future(() {
+        ref.read(fileTreeProvider.notifier).loadProject(widget.rootPath!);
+      });
+    }
+  }
+
+  void _loadProject() {
+    final path = widget.rootPath ?? '/home/kotdath/omp/personal/rust/aurocode';
+    ref.read(fileTreeProvider.notifier).loadProject(path);
   }
 
   @override

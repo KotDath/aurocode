@@ -1,31 +1,45 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:async';
 
 import '../../../core/di/providers.dart';
 import '../application/editor_notifier.dart';
 import '../application/editor_state.dart';
+import '../application/language_service.dart';
+import '../application/rope_editor_controller.dart';
 import '../domain/entities/editor_document.dart';
-import '../domain/entities/highlight_token.dart';
-import '../domain/entities/highlight_theme.dart';
-import '../infrastructure/syntax_highlighter.dart';
+import '../domain/entities/rope.dart';
+import '../domain/entities/rope_change.dart';
+import 'rope_editor_widget.dart';
 
 // Providers
-final syntaxHighlighterProvider = Provider<SyntaxHighlighterService>((ref) {
-  return SyntaxHighlighterService();
-});
-
 final editorProvider =
     StateNotifierProvider<EditorNotifier, EditorState>((ref) {
   final fileRepository = ref.watch(fileSystemRepositoryProvider);
-  return EditorNotifier(fileRepository);
+  final languageService = ref.watch(languageServiceProvider);
+  return EditorNotifier(fileRepository, languageService);
 });
 
-class EditorTabsWidget extends ConsumerWidget {
+class EditorTabsWidget extends ConsumerStatefulWidget {
   const EditorTabsWidget({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<EditorTabsWidget> createState() => _EditorTabsWidgetState();
+}
+
+class _EditorTabsWidgetState extends ConsumerState<EditorTabsWidget> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final state = ref.watch(editorProvider);
 
     if (state.openDocuments.isEmpty) {
@@ -42,15 +56,29 @@ class EditorTabsWidget extends ConsumerWidget {
           ),
         ),
       ),
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: state.openDocuments.length,
-        itemBuilder: (context, index) {
-          final document = state.openDocuments[index];
-          final isActive = document.path == state.activeDocument?.path;
-
-          return _buildTab(context, ref, document, isActive);
+      child: Listener(
+        onPointerSignal: (event) {
+          if (event is PointerScrollEvent) {
+            final offset = _scrollController.offset + event.scrollDelta.dy;
+            _scrollController.jumpTo(
+              offset.clamp(0.0, _scrollController.position.maxScrollExtent),
+            );
+          }
         },
+        child: ScrollConfiguration(
+          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+          child: ListView.builder(
+            controller: _scrollController,
+            scrollDirection: Axis.horizontal,
+            itemCount: state.openDocuments.length,
+            itemBuilder: (context, index) {
+              final document = state.openDocuments[index];
+              final isActive = document.path == state.activeDocument?.path;
+
+              return _buildTab(context, ref, document, isActive);
+            },
+          ),
+        ),
       ),
     );
   }
@@ -111,44 +139,28 @@ class CodeEditorWidget extends ConsumerStatefulWidget {
 }
 
 class _CodeEditorWidgetState extends ConsumerState<CodeEditorWidget> {
-  final ScrollController _lineNumberScrollController = ScrollController();
-  final ScrollController _codeScrollController = ScrollController();
-  CodeController? _textController;
+  RopeEditorController? _ropeController;
   String? _currentPath;
   bool _lspInitialized = false;
 
   @override
-  void initState() {
-    super.initState();
-    _codeScrollController.addListener(_syncLineNumbers);
-  }
-
-  void _syncLineNumbers() {
-    if (_lineNumberScrollController.hasClients) {
-      _lineNumberScrollController.jumpTo(_codeScrollController.offset);
-    }
-  }
-
-  @override
   void dispose() {
     _closeCurrentDocument();
-    _codeScrollController.removeListener(_syncLineNumbers);
-    _lineNumberScrollController.dispose();
-    _codeScrollController.dispose();
-    _textController?.dispose();
+    _ropeController?.dispose();
     super.dispose();
   }
 
   Future<void> _openDocumentInLsp(EditorDocument document) async {
     final provider = ref.read(highlightProviderProvider);
-    debugPrint('[Editor] Opening document in LSP: ${document.path}');
     try {
       await provider.documentOpened(document.path, document.content, document.language);
-      _lspInitialized = true;
-      debugPrint('[Editor] LSP document opened, requesting tokens...');
-      _requestSemanticTokens(document.path);
+      if (mounted) {
+        setState(() {
+          _lspInitialized = true;
+        });
+      }
     } catch (e) {
-      debugPrint('[Editor] LSP open failed: $e');
+      // Ignore
     }
   }
 
@@ -159,38 +171,62 @@ class _CodeEditorWidgetState extends ConsumerState<CodeEditorWidget> {
     }
   }
 
-  Future<void> _notifyContentChanged(String path, String content) async {
-    if (!_lspInitialized) return;
-    final provider = ref.read(highlightProviderProvider);
-    await provider.documentChanged(path, content);
+  Timer? _debounceTimer;
+
+  void _onContentChanged(Rope rope, RopeChange? change) {
+    if (_debounceTimer?.isActive ?? false) _debounceTimer!.cancel();
     
-    Future.delayed(const Duration(milliseconds: 500), () {
-      if (mounted && _currentPath == path) {
-        _requestSemanticTokens(path);
+    // For incremental updates, we don't need to debounce as aggressively 
+    // because we aren't doing the expensive O(N) toString().
+    
+    // However, we still update the global state (which might need toString if it's dumb).
+    // Let's optimize: Only notify LSP incrementally immediately?
+    // But we also need to update editorProvider state... 
+    // If editorProvider needs full string, we are still stuck.
+    // Let's assume editorProvider can wait (debounce 500ms).
+    // But LSP should be fast for responsiveness (diagnostics, etc).
+    
+    // If we have a delta, send it to LSP immediately!
+    if (change != null && _lspInitialized) {
+      final document = ref.read(editorProvider).activeDocument;
+      if (document != null && !document.isReadOnly) {
+        final provider = ref.read(highlightProviderProvider);
+        provider.documentChangedWithRange(document.path, rope, change);
+      }
+    }
+
+    _debounceTimer = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      
+      final document = ref.read(editorProvider).activeDocument;
+      if (document == null || document.isReadOnly) return;
+      
+      // Update global state (still potentially expensive, but debounced)
+      final content = rope.toString();
+      ref.read(editorProvider.notifier).updateContent(document.path, content);
+      
+      // If we didn't have a change object (e.g. undo/redo might not pass it correctly yet?), 
+      // or if we just want to ensure consistency, we could full-sync here too?
+      // But we handled LSP above.
+      
+      // Note: If 'change' was null (e.g. from setRope/undo without delta), we might need to full sync LSP here.
+      if (change == null && _lspInitialized) {
+        final provider = ref.read(highlightProviderProvider);
+        provider.documentChanged(document.path, content);
       }
     });
-  }
-
-  Future<void> _requestSemanticTokens(String path) async {
-    final provider = ref.read(highlightProviderProvider);
-    debugPrint('[Editor] Requesting semantic tokens for: $path');
-    final tokens = await provider.highlight(
-      _textController?.text ?? '',
-      ref.read(editorProvider).activeDocument?.language ?? '',
-      path,
-    );
-    
-    debugPrint('[Editor] Got ${tokens?.length ?? 0} semantic tokens');
-    if (mounted && _textController != null && _currentPath == path) {
-      setState(() {
-        _textController!.semanticTokens = tokens;
-      });
-    }
   }
 
   void _saveCurrentFile() {
     final document = ref.read(editorProvider).activeDocument;
     if (document != null && document.isDirty) {
+      // Sync content from controller before saving
+      if (_ropeController != null) {
+        ref.read(editorProvider.notifier).updateContent(
+          document.path, 
+          _ropeController!.rope.toString(),
+        );
+      }
       ref.read(editorProvider.notifier).saveDocument(document);
     }
   }
@@ -221,17 +257,16 @@ class _CodeEditorWidgetState extends ConsumerState<CodeEditorWidget> {
       );
     }
 
-    // Update text controller when document changes
+    // Update controller when document changes
     if (_currentPath != document.path) {
       _closeCurrentDocument();
       _currentPath = document.path;
       _lspInitialized = false;
-      _textController?.dispose();
-      final highlighter = ref.read(syntaxHighlighterProvider);
-      _textController = CodeController(
-        text: document.content,
-        language: document.language,
-        syntaxHighlighter: highlighter,
+      _ropeController?.dispose();
+      _ropeController = RopeEditorController(
+        initialText: document.content,
+        readOnly: document.isReadOnly,
+        onChanged: _onContentChanged,
       );
       _openDocumentInLsp(document);
     }
@@ -281,86 +316,52 @@ class _CodeEditorWidgetState extends ConsumerState<CodeEditorWidget> {
             displayParts.join(' / '),
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
+          if (document.isReadOnly) ...[
+            const SizedBox(width: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.amber.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: Colors.amber.withValues(alpha: 0.5),
+                  width: 1,
+                ),
+              ),
+              child: const Text(
+                'READ ONLY',
+                style: TextStyle(
+                  fontSize: 10,
+                  color: Colors.amber,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
   }
 
   Widget _buildEditor(BuildContext context, EditorDocument document) {
-    final lines = document.content.split('\n');
-    const textStyle = TextStyle(
-      fontFamily: 'JetBrainsMono',
-      fontSize: 14,
-      height: 1.5,
-    );
-    const strutStyle = StrutStyle(
-      fontFamily: 'JetBrainsMono',
-      fontSize: 14,
-      height: 1.5,
-      forceStrutHeight: true,
-    );
-
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Line numbers - synced with code scroll, no scrollbar
-        SizedBox(
-          width: 50,
-          child: IgnorePointer(
-            child: ScrollConfiguration(
-              behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-              child: ListView.builder(
-                controller: _lineNumberScrollController,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: lines.length,
-                itemBuilder: (context, index) => SizedBox(
-                  height: 21,
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: Text(
-                        '${index + 1}',
-                        style: textStyle.copyWith(color: Colors.grey.shade600),
-                        strutStyle: strutStyle,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-        const VerticalDivider(width: 1),
-        // Code content - editable, with single scrollbar
-        Expanded(
-          child: Scrollbar(
-            controller: _codeScrollController,
-            thumbVisibility: true,
-            child: ScrollConfiguration(
-              behavior: const _NoScrollbarBehavior(),
-              child: TextField(
-                controller: _textController,
-                scrollController: _codeScrollController,
-                maxLines: null,
-                expands: true,
-                keyboardType: TextInputType.multiline,
-                style: textStyle.copyWith(color: Colors.white),
-                strutStyle: strutStyle,
-                decoration: const InputDecoration(
-                  isDense: true,
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.all(8),
-                ),
-                onChanged: (value) {
-                  ref.read(editorProvider.notifier).updateContent(document.path, value);
-                  setState(() {}); // Rebuild line numbers
-                },
-              ),
-            ),
-          ),
-        ),
-      ],
+    if (_ropeController == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    
+    final highlightProvider = ref.watch(highlightProviderProvider);
+    
+    return RopeEditorWidget(
+      controller: _ropeController!,
+      highlightProvider: highlightProvider,
+      language: document.language,
+      filePath: document.path,
+      textStyle: const TextStyle(
+        fontFamily: 'JetBrainsMono',
+        fontSize: 14,
+        height: 1.5,
+        color: Colors.white,
+      ),
+      lspReady: _lspInitialized,
     );
   }
 }
@@ -376,85 +377,5 @@ class EditorArea extends ConsumerWidget {
         Expanded(child: CodeEditorWidget()),
       ],
     );
-  }
-}
-
-
-class _NoScrollbarBehavior extends ScrollBehavior {
-  const _NoScrollbarBehavior();
-
-  @override
-  Widget buildScrollbar(BuildContext context, Widget child, ScrollableDetails details) {
-    return child;
-  }
-}
-
-class CodeController extends TextEditingController {
-  final String language;
-  final SyntaxHighlighterService syntaxHighlighter;
-  List<HighlightToken>? semanticTokens;
-
-  CodeController({
-    super.text,
-    required this.language,
-    required this.syntaxHighlighter,
-  });
-
-  @override
-  TextSpan buildTextSpan({
-    required BuildContext context,
-    TextStyle? style,
-    required bool withComposing,
-  }) {
-    // Use semantic tokens if available
-    if (semanticTokens != null && semanticTokens!.isNotEmpty) {
-      return _buildSemanticSpan(style);
-    }
-    
-    // Fall back to regex highlighting
-    final highlighted = syntaxHighlighter.highlight(text, language);
-    if (highlighted != null) {
-      return TextSpan(
-        style: style,
-        children: [highlighted],
-      );
-    }
-    return super.buildTextSpan(
-      context: context,
-      style: style,
-      withComposing: withComposing,
-    );
-  }
-
-  TextSpan _buildSemanticSpan(TextStyle? baseStyle) {
-    if (text.isEmpty) {
-      return TextSpan(text: '', style: baseStyle);
-    }
-
-    final spans = <TextSpan>[];
-    final sortedTokens = List<HighlightToken>.from(semanticTokens!)
-      ..sort((a, b) => a.start.compareTo(b.start));
-
-    var currentPos = 0;
-    for (final token in sortedTokens) {
-      if (token.start > currentPos && token.start <= text.length) {
-        spans.add(TextSpan(text: text.substring(currentPos, token.start), style: baseStyle));
-      }
-
-      final tokenEnd = token.end.clamp(0, text.length);
-      final tokenStart = token.start.clamp(0, text.length);
-      if (tokenStart < tokenEnd) {
-        final tokenText = text.substring(tokenStart, tokenEnd);
-        final tokenStyle = HighlightTheme.atomOneDark.getStyle(token.type, token.modifiers);
-        spans.add(TextSpan(text: tokenText, style: baseStyle?.merge(tokenStyle) ?? tokenStyle));
-        currentPos = tokenEnd;
-      }
-    }
-
-    if (currentPos < text.length) {
-      spans.add(TextSpan(text: text.substring(currentPos), style: baseStyle));
-    }
-
-    return TextSpan(children: spans);
   }
 }

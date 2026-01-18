@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../../editor/domain/entities/diagnostic.dart';
 import '../../editor/domain/entities/highlight_token.dart';
 import '../domain/entities/lsp_messages.dart';
 import 'json_rpc_codec.dart';
@@ -12,6 +13,14 @@ import 'language_server_config.dart';
 
 /// State of the LSP client.
 enum LspClientState { disconnected, initializing, ready, shuttingDown, stopped }
+
+/// Diagnostics for a specific file URI.
+class FileDiagnostics {
+  final String uri;
+  final List<EditorDiagnostic> diagnostics;
+
+  const FileDiagnostics({required this.uri, required this.diagnostics});
+}
 
 /// A client for communicating with a language server.
 class LspClient {
@@ -33,6 +42,10 @@ class LspClient {
 
   final _notificationController = StreamController<LspNotification>.broadcast();
   Stream<LspNotification> get notifications => _notificationController.stream;
+
+  final _diagnosticsController = StreamController<FileDiagnostics>.broadcast();
+  /// Stream of diagnostics updates per file.
+  Stream<FileDiagnostics> get diagnostics => _diagnosticsController.stream;
 
   LspClient({required this.config, this.workspaceRoot});
 
@@ -124,11 +137,67 @@ class LspClient {
       case LspResponse():
         _pendingRequests.remove(message.id)?.complete(message);
       case LspNotification():
-        _notificationController.add(message);
+        _handleNotification(message);
       case LspRequest():
         _handleServerRequest(message);
     }
   }
+
+  void _handleNotification(LspNotification notification) {
+    _notificationController.add(notification);
+
+    if (notification.method == 'textDocument/publishDiagnostics') {
+      _handlePublishDiagnostics(notification.params as Map<String, dynamic>);
+    }
+  }
+
+  void _handlePublishDiagnostics(Map<String, dynamic> params) {
+    final uri = params['uri'] as String;
+    final rawDiagnostics = params['diagnostics'] as List<dynamic>? ?? [];
+
+    final diagnostics = rawDiagnostics.map((d) {
+      final diag = d as Map<String, dynamic>;
+      final range = diag['range'] as Map<String, dynamic>;
+      final start = range['start'] as Map<String, dynamic>;
+      final end = range['end'] as Map<String, dynamic>;
+
+      // LSP gives line/character, we need to store them temporarily.
+      // We'll convert to offsets in the service layer where we have the source text.
+      final startLine = start['line'] as int;
+      final startChar = start['character'] as int;
+      final endLine = end['line'] as int;
+      final endChar = end['character'] as int;
+
+      final severity = switch (diag['severity'] as int?) {
+        1 => DiagnosticSeverity.error,
+        2 => DiagnosticSeverity.warning,
+        3 => DiagnosticSeverity.information,
+        4 => DiagnosticSeverity.hint,
+        _ => DiagnosticSeverity.error,
+      };
+
+      return EditorDiagnostic(
+        // Store line-based info temporarily encoded as start/end
+        // The service will need to convert these to offsets
+        start: _encodeLineChar(startLine, startChar),
+        end: _encodeLineChar(endLine, endChar),
+        message: diag['message'] as String? ?? '',
+        severity: severity,
+        code: diag['code']?.toString(),
+        source: diag['source'] as String?,
+      );
+    }).toList();
+
+    _diagnosticsController.add(FileDiagnostics(uri: uri, diagnostics: diagnostics));
+  }
+
+  /// Encode line and character into a single int for temporary storage.
+  /// Format: line * 100000 + character (supports up to 100k columns per line).
+  int _encodeLineChar(int line, int character) => line * 100000 + character;
+
+  /// Decode line and character from encoded int.
+  static (int line, int character) decodeLineChar(int encoded) =>
+      (encoded ~/ 100000, encoded % 100000);
 
   void _handleServerRequest(LspRequest request) {
     switch (request.method) {
@@ -186,10 +255,24 @@ class LspClient {
     });
   }
 
-  void didChange({required String uri, required int version, required String text}) {
+  void didChange({
+    required String uri, 
+    required int version, 
+    required String text,
+    Map<String, dynamic>? range,
+    int? rangeLength,
+  }) {
+    final change = <String, dynamic>{'text': text};
+    if (range != null) {
+      change['range'] = range;
+    }
+    if (rangeLength != null) {
+      change['rangeLength'] = rangeLength;
+    }
+
     sendNotification('textDocument/didChange', {
       'textDocument': {'uri': uri, 'version': version},
-      'contentChanges': [{'text': text}],
+      'contentChanges': [change],
     });
   }
 
@@ -214,23 +297,29 @@ class LspClient {
 
   List<HighlightToken> _decodeSemanticTokens(List<int> data, String sourceText) {
     final tokens = <HighlightToken>[];
-    final lines = sourceText.split('\n');
     
-    // Calculate line start offsets
+    // DEBUG: Trace semantic tokens
+    print('[LSP] Decoding ${data.length} integers from semantic tokens response');
+    
+    // Calculate line start offsets by scanning for newlines
     final lineOffsets = <int>[0];
-    for (var i = 0; i < lines.length - 1; i++) {
-      lineOffsets.add(lineOffsets[i] + lines[i].length + 1); // +1 for \n
+    for (var i = 0; i < sourceText.length; i++) {
+      if (sourceText.codeUnitAt(i) == 10) { // \n
+        lineOffsets.add(i + 1);
+      }
     }
+    // Ensure we can handle "next line" even if file doesn't end in newline
+    // by treating subsequent lines as starting at EOF
     
     var line = 0;
     var character = 0;
 
-    for (var i = 0; i + 4 < data.length; i += 5) {
+    for (var i = 0; i < data.length; i += 5) {
       final deltaLine = data[i];
       final deltaStart = data[i + 1];
       final length = data[i + 2];
-      final tokenType = data[i + 3];
-      final tokenModifiers = data[i + 4];
+      final tokenTypeIndex = data[i + 3];
+      final tokenModifierBitset = data[i + 4];
 
       // Update position using LSP delta encoding
       if (deltaLine > 0) {
@@ -241,17 +330,29 @@ class LspClient {
       }
 
       // Calculate byte offset from line/character
-      final offset = (line < lineOffsets.length ? lineOffsets[line] : 0) + character;
+      int offset = 0;
+      if (line < lineOffsets.length) {
+        offset = lineOffsets[line] + character;
+      } else {
+        // Line out of bounds (shouldn't happen with correct LSP server)
+        // Fallback: estimate based on last line
+        offset = sourceText.length; 
+      }
+      
+      // Clamp to source length
+      if (offset > sourceText.length) offset = sourceText.length;
+      var end = offset + length;
+      if (end > sourceText.length) end = sourceText.length;
 
-      final typeName = tokenType < semanticTokenTypes!.length
-          ? semanticTokenTypes![tokenType]
+      final typeName = (semanticTokenTypes != null && tokenTypeIndex < semanticTokenTypes!.length)
+          ? semanticTokenTypes![tokenTypeIndex]
           : 'unknown';
 
       tokens.add(HighlightToken(
         start: offset,
-        end: offset + length,
+        end: end,
         type: typeName,
-        modifiers: _decodeModifiers(tokenModifiers),
+        modifiers: _decodeModifiers(tokenModifierBitset),
       ));
     }
     return tokens;
@@ -279,6 +380,7 @@ class LspClient {
   Future<void> _cleanup() async {
     await _messageSubscription?.cancel();
     await _notificationController.close();
+    await _diagnosticsController.close();
     _process = null;
     _state = LspClientState.stopped;
   }

@@ -19,7 +19,9 @@ import 'package:re_highlight/languages/java.dart';
 import 'package:re_highlight/languages/kotlin.dart';
 import 'package:re_highlight/languages/swift.dart';
 import 'package:re_highlight/languages/gradle.dart';
+import 'package:re_highlight/languages/gradle.dart';
 import 'package:re_highlight/styles/atom-one-dark.dart';
+import '../domain/entities/highlight_token.dart';
 
 class SyntaxHighlighterService {
   final Highlight _highlight = Highlight();
@@ -83,6 +85,128 @@ class SyntaxHighlighterService {
         text: code,
         style: const TextStyle(fontFamily: 'JetBrainsMono', fontSize: 14),
       );
+    }
+  }
+
+  List<HighlightToken> highlightAsTokens(String code, String language) {
+    if (code.isEmpty) return [];
+
+    _ensureInitialized();
+    
+    // Map common hljs scopes to semantic token types
+    final scopeMap = {
+      'keyword': 'keyword',
+      'built_in': 'variable',
+      'type': 'type',
+      'literal': 'number',
+      'number': 'number',
+      'regexp': 'regexp',
+      'string': 'string',
+      'subst': 'variable',
+      'symbol': 'variable',
+      'class': 'class',
+      'function': 'function',
+      'title': 'function',
+      'params': 'parameter',
+      'comment': 'comment',
+      'doctag': 'comment',
+      'meta': 'macro',
+      'meta-keyword': 'keyword',
+      'meta-string': 'string',
+      'section': 'class',
+      'tag': 'type',
+      'name': 'variable',
+      'attr': 'property',
+      'attribute': 'property',
+      'variable': 'variable',
+      'bullet': 'string',
+      'code': 'string',
+      'emphasis': 'modifier',
+      'strong': 'modifier',
+      'formula': 'string',
+      'link': 'string',
+      'quote': 'string',
+      'selector-tag': 'keyword',
+      'selector-id': 'variable',
+      'selector-class': 'class',
+      'selector-attr': 'property',
+      'selector-pseudo': 'modifier',
+      'template-tag': 'keyword',
+      'template-variable': 'variable',
+      'diff': 'comment',
+      'deletion': 'comment',
+      'addition': 'string',
+      'operator': 'operator',
+      'punctuation': 'operator',
+    };
+
+    try {
+      final result = _highlight.highlight(
+        code: code,
+        language: language,
+      );
+
+      final renderer = _TokenRenderer(scopeMap);
+      result.render(renderer);
+      return renderer.tokens;
+    } catch (e) {
+      return [];
+    }
+  }
+}
+
+class _TokenRenderer implements HighlightRenderer {
+  final Map<String, String> scopeMap;
+  final List<HighlightToken> tokens = [];
+  int _currentOffset = 0;
+  final List<String> _scopeStack = [];
+
+  _TokenRenderer(this.scopeMap);
+
+  @override
+  void addText(String text) {
+    if (text.isEmpty) return;
+    
+    if (_scopeStack.isNotEmpty) {
+      final scope = _scopeStack.last;
+      
+      // Try exact match, then parts for composed scopes (e.g. meta-keyword)
+      String type = scopeMap[scope] ?? 'variable';
+      if (scopeMap[scope] == null && scope.contains('-')) {
+         final parts = scope.split('-');
+         type = scopeMap[parts.last] ?? type;
+      }
+      
+      tokens.add(HighlightToken(
+        start: _currentOffset,
+        end: _currentOffset + text.length,
+        type: type,
+      ));
+    }
+    _currentOffset += text.length;
+  }
+
+  @override
+  void openNode(DataNode node) {
+    // print('DataNode: ${node.scope}, ${node.kind}, ${node.className}'); // Guessing
+    // To debug what properties exist, I'll temporarily use dynamic (unsafe but works for print if runtime supports)
+    // Actually I can't cast to dynamic if compilation fails on property access.
+    // So I have to guess or cast to dynamic first.
+    
+    // cast to dynamic to check contents at runtime (if I can compile)
+    // But compilation fails at static check.
+    
+    // If I cast to dynamic, I bypass static check?
+    // final d = node as dynamic;
+    // print(d);
+    
+    _scopeStack.add((node as dynamic).kind ?? (node as dynamic).scope ?? (node as dynamic).className ?? '');
+  }
+
+  @override
+  void closeNode(DataNode node) {
+    if (_scopeStack.isNotEmpty) {
+      _scopeStack.removeLast();
     }
   }
 }

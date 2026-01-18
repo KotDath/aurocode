@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import 'package:window_manager/window_manager.dart';
 
+import '../../../core/services/file_dialog_service.dart';
 import '../../../core/shared/widgets/resizable_split_view.dart';
 import '../../ai_panel/presentation/ai_panel_widget.dart';
 import '../../editor/presentation/code_editor_widget.dart';
@@ -18,7 +20,8 @@ class IdeLayout extends ConsumerStatefulWidget {
 
 class _IdeLayoutState extends ConsumerState<IdeLayout> {
   bool _aiPanelVisible = false;
-  static const String _projectPath = '/home/kotdath/omp/personal/rust/aurocode';
+  String _projectPath = '/home/kotdath/omp/personal/rust/aurocode';
+  final _fileDialogService = FileDialogService();
 
   @override
   Widget build(BuildContext context) {
@@ -95,7 +98,7 @@ class _IdeLayoutState extends ConsumerState<IdeLayout> {
                 _MenuItem('Save As...', 'Ctrl+Shift+S'),
                 _MenuSeparator(),
                 _MenuItem('Close Editor', 'Ctrl+W'),
-              ]),
+              ], _handleFileMenuAction),
               _buildMenuTextButton(context, 'Edit', [
                 _MenuItem('Undo', 'Ctrl+Z'),
                 _MenuItem('Redo', 'Ctrl+Shift+Z'),
@@ -124,7 +127,7 @@ class _IdeLayoutState extends ConsumerState<IdeLayout> {
               ]),
               const SizedBox(width: 8),
               // Run button
-              const RunButtonWidget(projectPath: _projectPath),
+              RunButtonWidget(projectPath: _projectPath),
               const Spacer(),
               // Window title centered
               const IgnorePointer(
@@ -159,8 +162,48 @@ class _IdeLayoutState extends ConsumerState<IdeLayout> {
     );
   }
 
-  Widget _buildMenuTextButton(BuildContext context, String label, List<_MenuItemBase> items) {
-    return _HoverableMenuButton(label: label, items: items);
+  Widget _buildMenuTextButton(BuildContext context, String label, List<_MenuItemBase> items, [void Function(String)? onSelected]) {
+    return _HoverableMenuButton(label: label, items: items, onSelected: onSelected);
+  }
+
+  Future<void> _handleFileMenuAction(String action) async {
+    switch (action) {
+      case 'Open File...':
+        final path = await _fileDialogService.pickFile();
+        if (path != null) {
+          ref.read(editorProvider.notifier).openFile(path);
+        }
+        break;
+      case 'Open Folder...':
+        final path = await _fileDialogService.pickDirectory();
+        if (path != null) {
+          setState(() => _projectPath = path);
+        }
+        break;
+      case 'Save':
+        final doc = ref.read(editorProvider).activeDocument;
+        if (doc != null) {
+          ref.read(editorProvider.notifier).saveDocument(doc);
+        }
+        break;
+      case 'Save As...':
+        final doc = ref.read(editorProvider).activeDocument;
+        if (doc != null) {
+          final newPath = await _fileDialogService.pickSaveLocation(
+            fileName: p.basename(doc.path),
+          );
+          if (newPath != null) {
+            ref.read(editorProvider.notifier).saveAsDocument(doc, newPath);
+          }
+        }
+        break;
+      case 'Close Editor':
+        final doc = ref.read(editorProvider).activeDocument;
+        if (doc != null) {
+          ref.read(editorProvider.notifier).closeDocument(doc);
+        }
+        break;
+    }
   }
 
   Widget _buildTitleBarIconButton({
@@ -208,6 +251,7 @@ class _IdeLayoutState extends ConsumerState<IdeLayout> {
 
   Widget _buildFileTree() {
     return FileTreeWidget(
+      rootPath: _projectPath,
       onFileSelected: (path) {
         ref.read(editorProvider.notifier).openFile(path);
       },
@@ -248,8 +292,9 @@ class _MenuSeparator extends _MenuItemBase {}
 class _HoverableMenuButton extends StatefulWidget {
   final String label;
   final List<_MenuItemBase> items;
+  final void Function(String)? onSelected;
 
-  const _HoverableMenuButton({required this.label, required this.items});
+  const _HoverableMenuButton({required this.label, required this.items, this.onSelected});
 
   @override
   State<_HoverableMenuButton> createState() => _HoverableMenuButtonState();
@@ -269,6 +314,7 @@ class _HoverableMenuButtonState extends State<_HoverableMenuButton> {
         color: const Color(0xFF2D2D30),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
         popUpAnimationStyle: AnimationStyle.noAnimation,
+        onSelected: widget.onSelected,
         itemBuilder: (context) {
           final List<PopupMenuEntry<String>> entries = [];
           for (final item in widget.items) {
