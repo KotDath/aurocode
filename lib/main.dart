@@ -3,8 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'core/theme/app_theme.dart';
-import 'features/id_layout/presentation/ide_layout.dart';
-import 'features/ide_layout/presentation/ide_layout.dart';
 import 'features/ide_layout/presentation/ide_layout.dart';
 
 void main() async {
